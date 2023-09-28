@@ -116,6 +116,13 @@ trait IDataStore<TContractState> {
     /// * `value` - The value to subtract.
     fn decrement_u128(ref self: TContractState, key: felt252, value: u128) -> u128;
 
+    /// Add the input int value to the existing uint value, prevent the uint
+    /// value from becoming negative
+    /// # Arguments
+    /// * `key` -  the key of the value
+    /// * `value` - the input int value
+    fn apply_bounded_delta_to_u128(ref self: TContractState, key: felt252, value: u128) -> u128;
+
     // *************************************************************************
     //                      Address related functions.
     // *************************************************************************
@@ -193,6 +200,26 @@ trait IDataStore<TContractState> {
     /// # Returns
     /// Array of markets contract addresses.
     fn get_market_keys(self: @TContractState, start: usize, end: usize) -> Array<ContractAddress>;
+
+    // *************************************************************************
+    //                      Oracle related functions.
+    // *************************************************************************
+    /// Sets the token ID for a given contract address.
+    /// This function checks if the caller has the `CONTROLLER` role
+    /// before updating the `tokens_ids` mapping.
+    /// # Arguments
+    /// * `self` - Mutable reference to the contract state.
+    /// * `token` - Contract address for which to set the ID.
+    /// * `id` - The ID to set.
+    fn set_token_id(ref self: TContractState, token: ContractAddress, id: felt252);
+
+    /// Retrieves the token ID associated with a given contract address.
+    /// # Arguments
+    /// * `self` - Reference to the contract state.
+    /// * `token` - Contract address for which to retrieve the ID.
+    /// # Returns
+    /// Returns the ID associated with the given token address.
+    fn get_token_id(self: @TContractState, token: ContractAddress) -> felt252;
 
     // *************************************************************************
     //                      Order related functions.
@@ -416,6 +443,12 @@ trait IDataStore<TContractState> {
     /// * `key` - The key to delete the value for.
     fn remove_i128(ref self: TContractState, key: felt252);
 
+    // @dev add the input int value to the existing int value
+    // @param key the key of the value
+    // @param value the input int value
+    // @return the new int value
+    fn apply_delta_to_i128(ref self: TContractState, key: felt252, value: u128) -> u128;
+
     /// Add input to existing value.
     /// # Arguments
     /// * `key` - The key to add the value to.
@@ -454,6 +487,8 @@ mod DataStore {
     use satoru::position::{position::Position, error::PositionError};
     use satoru::withdrawal::{withdrawal::Withdrawal, error::WithdrawalError};
     use satoru::deposit::{deposit::Deposit, error::DepositError};
+    use satoru::utils::calc::sum_return_uint_128;
+    use integer::i128_to_felt252;
 
     // *************************************************************************
     //                              STORAGE
@@ -471,6 +506,8 @@ mod DataStore {
         market_values: LegacyMap::<ContractAddress, Market>,
         markets: List<Market>,
         market_indexes: LegacyMap::<ContractAddress, usize>,
+        /// Oracle storage
+        tokens_ids: LegacyMap::<ContractAddress, felt252>,
         /// Order storage
         order_values: LegacyMap::<felt252, Order>,
         orders: List<Order>,
@@ -647,6 +684,22 @@ mod DataStore {
             new_value
         }
 
+        fn apply_bounded_delta_to_u128(ref self: ContractState, key: felt252, value: u128) -> u128 {
+            let uintValue: u128 = self.u128_values.read(key);
+            // let felt252_value: felt252 = i128_to_felt252(-value);
+            // let u128_value = felt252_value.try_into().unwrap();
+            // if (value < 0 && u128_value > uintValue) {
+            //     self.u128_values.write(key, 0);
+            //     return 0;
+            // }
+
+            //let nextUint: u128 = sum_return_uint_128(uintValue, value);
+            let nextUint: u128 = uintValue + value;
+            self.u128_values.write(key, nextUint);
+            return nextUint;
+        }
+
+
         //TODO: Update u128 to i128 when Serde and Store for i128 implementations are released.
         // *************************************************************************
         //                      i128 related functions.
@@ -668,6 +721,13 @@ mod DataStore {
             // Delete the value.
             self.i128_values.write(key, Default::default());
         }
+
+        fn apply_delta_to_i128(ref self: ContractState, key: felt252, value: u128) -> u128 {
+            let next_int: u128 = self.i128_values.read(key) + value;
+            self.i128_values.write(key, next_int);
+            return next_int;
+        }
+
 
         fn increment_i128(ref self: ContractState, key: felt252, value: u128) -> u128 {
             // Check that the caller has permission to set the value.
@@ -769,6 +829,7 @@ mod DataStore {
                 // Valid indexes start from 1.
                 self.market_indexes.write(key, markets.len() + 1);
                 markets.append(market);
+                self.set_address(self.get_market_salt_hash(salt), key);
                 return;
             }
             let index = offsetted_index - 1;
@@ -847,6 +908,18 @@ mod DataStore {
         }
 
         // *************************************************************************
+        //                      Oracle related functions.
+        // *************************************************************************
+        fn set_token_id(ref self: ContractState, token: ContractAddress, id: felt252) {
+            self.role_store.read().assert_only_role(get_caller_address(), role::CONTROLLER);
+            self.tokens_ids.write(token, id);
+        }
+
+        fn get_token_id(self: @ContractState, token: ContractAddress) -> felt252 {
+            self.tokens_ids.read(token)
+        }
+
+        // *************************************************************************
         //                      Order related functions.
         // *************************************************************************
 
@@ -862,7 +935,7 @@ mod DataStore {
         fn set_order(ref self: ContractState, key: felt252, order: Order) {
             // Check that the caller has permission to set the value.
             self.role_store.read().assert_only_role(get_caller_address(), role::CONTROLLER);
-            assert(order.account != 0.try_into().unwrap(), OrderError::CANT_BE_ZERO);
+            assert(order.account != contract_address_const::<0>(), OrderError::CANT_BE_ZERO);
 
             let mut orders = self.orders.read();
             let mut account_orders = self.account_orders.read(order.account);
@@ -993,7 +1066,7 @@ mod DataStore {
         fn set_position(ref self: ContractState, key: felt252, position: Position) {
             // Check that the caller has permission to set the value.
             self.role_store.read().assert_only_role(get_caller_address(), role::CONTROLLER);
-            assert(position.account != 0.try_into().unwrap(), PositionError::CANT_BE_ZERO);
+            assert(position.account != contract_address_const::<0>(), PositionError::CANT_BE_ZERO);
 
             let mut positions = self.positions.read();
             let mut account_positions = self.account_positions.read(position.account);
@@ -1124,7 +1197,9 @@ mod DataStore {
         fn set_withdrawal(ref self: ContractState, key: felt252, withdrawal: Withdrawal) {
             // Check that the caller has permission to set the value.
             self.role_store.read().assert_only_role(get_caller_address(), role::CONTROLLER);
-            assert(withdrawal.account != 0.try_into().unwrap(), WithdrawalError::CANT_BE_ZERO);
+            assert(
+                withdrawal.account != contract_address_const::<0>(), WithdrawalError::CANT_BE_ZERO
+            );
 
             let mut withdrawals = self.withdrawals.read();
             let mut account_withdrawals = self.account_withdrawals.read(withdrawal.account);
@@ -1251,7 +1326,7 @@ mod DataStore {
         fn set_deposit(ref self: ContractState, key: felt252, deposit: Deposit) {
             // Check that the caller has permission to set the value.
             self.role_store.read().assert_only_role(get_caller_address(), role::CONTROLLER);
-            assert(deposit.account != 0.try_into().unwrap(), DepositError::CANT_BE_ZERO);
+            assert(deposit.account != contract_address_const::<0>(), DepositError::CANT_BE_ZERO);
 
             let mut deposits = self.deposits.read();
             let mut account_deposits = self.account_deposits.read(deposit.account);
